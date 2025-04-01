@@ -1,48 +1,70 @@
-from flask import Flask, request, jsonify
-import json
+from flask import Flask, request
 import os
+import json
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+from datetime import datetime
+import requests
 
 app = Flask(__name__)
-
 CREDITS_FILE = "credits.json"
-API_KEY = "l0f6cyv6-tv47-hdlz-xqas-to1o6j1amh6v"
 
-# Load credits from file
-def load_credits():
+# Google Sheets setup
+def get_sheet():
+    creds = json.loads(os.getenv("GOOGLE_SERVICE_JSON"))
+    scope = ['https://spreadsheets.google.com/feeds','https://www.googleapis.com/auth/drive']
+    credentials = ServiceAccountCredentials.from_json_keyfile_dict(creds, scope)
+    gc = gspread.authorize(credentials)
+    return gc.open_by_key(os.getenv("GOOGLE_SHEET_ID")).worksheet("Logs")
+
+def log_event(event, user_id, amount, notes="Webhook Auto Topup"):
     try:
-        with open(CREDITS_FILE, "r") as f:
-            return json.load(f)
-    except:
-        return {}
+        sheet = get_sheet()
+        sheet.append_row([
+            datetime.now().isoformat(),
+            event,
+            str(user_id),
+            "-",
+            str(amount),
+            notes
+        ])
+    except Exception as e:
+        print(f"Sheet log failed: {e}")
 
-# Save credits to file
-def save_credits(data):
-    with open(CREDITS_FILE, "w") as f:
-        json.dump(data, f)
+def load_json(path):
+    if os.path.exists(path):
+        with open(path) as f: return json.load(f)
+    return {}
+
+def save_json(path, data):
+    with open(path, "w") as f: json.dump(data, f, indent=2)
+
+@app.route("/toyyibpay", methods=["POST"])
+def toyyibpay_webhook():
+    data = request.form
+    if data.get("billpaymentStatus") == "1":
+        telegram_id = data.get("billExternalReferenceNo")
+        if telegram_id:
+            credits = load_json(CREDITS_FILE)
+            credits.setdefault(telegram_id, {"credits": 5})
+            credits[telegram_id]["credits"] += 10
+            save_json(CREDITS_FILE, credits)
+
+            # Log and notify
+            log_event("Auto Topup", telegram_id, 10)
+            try:
+                BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+                requests.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                    data={"chat_id": telegram_id, "text": "✅ Payment received! 10 message credits added."}
+                )
+            except: pass
+            return "OK", 200
+    return "Ignored", 200
 
 @app.route("/", methods=["GET"])
-def index():
-    return "ToyyibPay Auto Topup Webhook is running!"
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.form.to_dict()
-    
-    print("Webhook received:", data)
-
-    # Make sure payment is successful
-    if data.get("paymentStatus") == "1":  # "1" = successful
-        ref = data.get("billExternalReferenceNo", "")
-        if ref.isdigit():
-            user_id = ref
-            credits = load_credits()
-            credits.setdefault(user_id, {"credits": 5})  # default if not in file
-            credits[user_id]["credits"] += 10  # top up 10 messages
-            save_credits(credits)
-            print(f"Auto-topped up 10 messages for user {user_id}")
-            return jsonify({"status": "success"}), 200
-
-    return jsonify({"status": "ignored"}), 200
+def home():
+    return "ToyyibPay Webhook is running."
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
+    app.run(host="0.0.0.0", port=5000)
